@@ -1,0 +1,606 @@
+# ============================================================
+# ANÁLISE COMPLETA DE CORRELAÇÃO
+# GEOMETRIAS x ÍNDICES ESPECTRAIS
+# Mata do Mamão - Araguaia
+# ============================================================
+
+# ------------------------------------------------------------
+# 0. Pacotes
+# ------------------------------------------------------------
+
+library(tidyverse)
+library(ggplot2)
+library(scales)
+
+# ------------------------------------------------------------
+# 1. Criar pasta de saída
+# ------------------------------------------------------------
+
+pasta_saida <- "resultados_correlacoes_geometrias"
+dir.create(pasta_saida, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# 2. Ler arquivos
+# ------------------------------------------------------------
+
+dados <- read_csv("Todos_Com_Indices_Spectrais.csv", show_col_types = FALSE)
+resumo <- read_csv("Resumo_Final_Geometrias.csv", show_col_types = FALSE)
+cor_gee <- read_csv("Correlacoes_Comparativo_6_Geometrias.csv", show_col_types = FALSE)
+shannon <- read_csv("Diversidade_Shannon_Geometrias.csv", show_col_types = FALSE)
+recuperacao <- read_csv("Taxa_Recuperacao_Pontos.csv", show_col_types = FALSE)
+
+# ------------------------------------------------------------
+# 3. Variáveis principais
+# ------------------------------------------------------------
+
+indices <- c(
+  "NDVI_mean",
+  "GNDVI_mean",
+  "SAVI_mean",
+  "BSI_mean",
+  "NDMI_mean",
+  "NBR_mean"
+)
+
+classes_originais <- c(
+  "p_lenhoso",
+  "p_nao_len",
+  "p_solo_nu",
+  "p_len_nlen",
+  "p_nlen_len"
+)
+
+dados <- dados %>%
+  mutate(
+    p_dupla = p_len_nlen + p_nlen_len
+  )
+
+classes <- c(
+  "p_lenhoso",
+  "p_nao_len",
+  "p_solo_nu",
+  "p_len_nlen",
+  "p_nlen_len",
+  "p_dupla"
+)
+
+nomes_classes <- c(
+  "p_lenhoso" = "lenhoso",
+  "p_nao_len" = "nao lenhoso",
+  "p_solo_nu" = "solo nu",
+  "p_len_nlen" = "lenhoso_nao_lenhoso",
+  "p_nlen_len" = "nao_lenhoso_lenhoso",
+  "p_dupla" = "classe dupla"
+)
+
+# ------------------------------------------------------------
+# 4. Função de correlação
+# ------------------------------------------------------------
+
+calcular_cor <- function(base, geometria_i, classe_i, indice_i) {
+  
+  sub <- base %>%
+    filter(geom_tipo == geometria_i) %>%
+    select(all_of(c(classe_i, indice_i))) %>%
+    drop_na()
+  
+  n <- nrow(sub)
+  
+  if (n < 3 || sd(sub[[classe_i]]) == 0 || sd(sub[[indice_i]]) == 0) {
+    return(tibble(
+      geometria = geometria_i,
+      classe = classe_i,
+      indice = indice_i,
+      R = NA_real_,
+      p_valor = NA_real_,
+      n = n
+    ))
+  }
+  
+  teste <- cor.test(
+    sub[[classe_i]],
+    sub[[indice_i]],
+    method = "pearson"
+  )
+  
+  tibble(
+    geometria = geometria_i,
+    classe = classe_i,
+    indice = indice_i,
+    R = as.numeric(teste$estimate),
+    p_valor = teste$p.value,
+    n = n
+  )
+}
+
+# ------------------------------------------------------------
+# 5. Calcular todas as correlações
+# ------------------------------------------------------------
+
+geometrias <- unique(dados$geom_tipo)
+
+correlacoes <- expand_grid(
+  geometria = geometrias,
+  classe = classes,
+  indice = indices
+) %>%
+  pmap_dfr(~ calcular_cor(
+    base = dados,
+    geometria_i = ..1,
+    classe_i = ..2,
+    indice_i = ..3
+  )) %>%
+  mutate(
+    abs_R = abs(R),
+    classe_nome = recode(classe, !!!nomes_classes),
+    significancia = case_when(
+      is.na(p_valor) ~ "",
+      p_valor < 0.001 ~ "***",
+      p_valor < 0.01 ~ "**",
+      p_valor < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+write_csv(
+  correlacoes,
+  file.path(pasta_saida, "01_correlacoes_gerais.csv")
+)
+
+# ------------------------------------------------------------
+# 6. Tabela resumo das geometrias
+# ------------------------------------------------------------
+
+melhor_por_geometria <- correlacoes %>%
+  group_by(geometria) %>%
+  slice_max(abs_R, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+tabela_resumo_geometrias <- resumo %>%
+  select(
+    geometrias = geometria,
+    n = n_features,
+    satelite,
+    `% lenhoso` = media_p_lenhoso,
+    `% nao lenhoso` = media_p_nao_len,
+    `% solo nu` = media_p_solo_nu
+  ) %>%
+  left_join(
+    melhor_por_geometria %>%
+      select(
+        geometrias = geometria,
+        `melhor classe para a geometria` = classe_nome,
+        `melhor indice para a geometria` = indice,
+        `melhor r para a geometria` = R
+      ),
+    by = "geometrias"
+  )
+
+write_csv(
+  tabela_resumo_geometrias,
+  file.path(pasta_saida, "02_resumo_geometrias_melhor_correlacao.csv")
+)
+
+# ------------------------------------------------------------
+# 7. Melhor índice para LENHOSO por geometria
+# ------------------------------------------------------------
+
+melhor_lenhoso <- correlacoes %>%
+  filter(classe == "p_lenhoso") %>%
+  group_by(geometria) %>%
+  slice_max(abs_R, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    geometria,
+    indice,
+    `melhor indice para lenhoso por geometria` = indice,
+    `R por geometria` = R,
+    `p-valor por geometria` = p_valor,
+    `n por geometria` = n
+  )
+
+write_csv(
+  melhor_lenhoso,
+  file.path(pasta_saida, "03_melhor_indice_lenhoso_por_geometria.csv")
+)
+
+grafico_lenhoso <- ggplot(
+  melhor_lenhoso,
+  aes(
+    x = `R por geometria`,
+    y = reorder(geometria, `R por geometria`),
+    fill = `R por geometria`
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = paste0(indice, " | r = ", round(`R por geometria`, 3))),
+    hjust = ifelse(melhor_lenhoso$`R por geometria` >= 0, -0.05, 1.05),
+    size = 3.5
+  ) +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  coord_cartesian(xlim = c(-1, 1), clip = "off") +
+  labs(
+    title = "Melhor índice espectral para % de lenhoso por geometria",
+    x = "Correlação de Pearson (r)",
+    y = "Geometria"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(10, 60, 10, 10)
+  )
+
+# ------------------------------------------------------------
+# 8. Melhor índice para CLASSE DUPLA por geometria
+# ------------------------------------------------------------
+
+melhor_dupla <- correlacoes %>%
+  filter(classe == "p_dupla") %>%
+  group_by(geometria) %>%
+  slice_max(abs_R, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    geometria,
+    indice,
+    `melhor indice para classe dupla por geometria` = indice,
+    `R por geometria` = R,
+    `p-valor por geometria` = p_valor,
+    `n por geometria` = n
+  )
+
+write_csv(
+  melhor_dupla,
+  file.path(pasta_saida, "04_melhor_indice_classe_dupla_por_geometria.csv")
+)
+
+grafico_dupla <- ggplot(
+  melhor_dupla,
+  aes(
+    x = `R por geometria`,
+    y = reorder(geometria, `R por geometria`),
+    fill = `R por geometria`
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = paste0(indice, " | r = ", round(`R por geometria`, 3))),
+    hjust = ifelse(melhor_dupla$`R por geometria` >= 0, -0.05, 1.05),
+    size = 3.5
+  ) +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  coord_cartesian(xlim = c(-1, 1), clip = "off") +
+  labs(
+    title = "Melhor índice espectral para classe dupla por geometria",
+    x = "Correlação de Pearson (r)",
+    y = "Geometria"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(10, 60, 10, 10)
+  )
+
+# ------------------------------------------------------------
+# 9. Matriz de correlação: LENHOSO x índice x geometria
+# ------------------------------------------------------------
+
+matriz_lenhoso <- correlacoes %>%
+  filter(classe == "p_lenhoso") %>%
+  select(geometria, indice, R, p_valor, n)
+
+write_csv(
+  matriz_lenhoso,
+  file.path(pasta_saida, "05_matriz_correlacao_lenhoso.csv")
+)
+
+grafico_matriz_lenhoso <- ggplot(
+  matriz_lenhoso,
+  aes(
+    x = indice,
+    y = geometria,
+    fill = R
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(
+    aes(label = round(R, 2)),
+    size = 3.7
+  ) +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  labs(
+    title = "Matriz de correlação: % lenhoso x índices espectrais médios",
+    x = "Índice espectral",
+    y = "Geometria",
+    fill = "r"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# ------------------------------------------------------------
+# 10. Melhor índice para SOLO NU por geometria
+# ------------------------------------------------------------
+
+melhor_solo <- correlacoes %>%
+  filter(classe == "p_solo_nu") %>%
+  group_by(geometria) %>%
+  slice_max(abs_R, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    geometria,
+    indice,
+    `melhor indice para solo nu por geometria` = indice,
+    R,
+    `p-valor` = p_valor,
+    n
+  )
+
+write_csv(
+  melhor_solo,
+  file.path(pasta_saida, "06_melhor_indice_solo_nu_por_geometria.csv")
+)
+
+grafico_solo <- ggplot(
+  melhor_solo,
+  aes(
+    x = R,
+    y = reorder(geometria, R),
+    fill = R
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = paste0(indice, " | r = ", round(R, 3))),
+    hjust = ifelse(melhor_solo$R >= 0, -0.05, 1.05),
+    size = 3.5
+  ) +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  coord_cartesian(xlim = c(-1, 1), clip = "off") +
+  labs(
+    title = "Melhor índice espectral para % de solo nu por geometria",
+    x = "Correlação de Pearson (r)",
+    y = "Geometria"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(10, 60, 10, 10)
+  )
+
+# ------------------------------------------------------------
+# 11. Tabela final: principais correlações da base
+# ------------------------------------------------------------
+
+tabela_principais_correlacoes <- correlacoes %>%
+  filter(classe %in% c("p_solo_nu", "p_dupla", "p_nao_len", "p_lenhoso")) %>%
+  group_by(classe_nome, geometria) %>%
+  slice_max(abs_R, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    classe = classe_nome,
+    geometrias = geometria,
+    `melhor indice` = indice,
+    R,
+    `p-valor` = p_valor,
+    n
+  ) %>%
+  arrange(classe, desc(abs(R)))
+
+write_csv(
+  tabela_principais_correlacoes,
+  file.path(pasta_saida, "07_principais_correlacoes_base.csv")
+)
+
+# ------------------------------------------------------------
+# 12. Gráfico geral das principais correlações
+# ------------------------------------------------------------
+
+grafico_principais <- tabela_principais_correlacoes %>%
+  mutate(
+    rotulo = paste0(`melhor indice`, " | r = ", round(R, 2))
+  ) %>%
+  ggplot(
+    aes(
+      x = R,
+      y = reorder(geometrias, R),
+      fill = R
+    )
+  ) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = rotulo),
+    hjust = ifelse(tabela_principais_correlacoes$R >= 0, -0.05, 1.05),
+    size = 3.2
+  ) +
+  facet_wrap(~ classe, scales = "free_y") +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  coord_cartesian(xlim = c(-1, 1), clip = "off") +
+  labs(
+    title = "Principais correlações por classe e geometria",
+    x = "Correlação de Pearson (r)",
+    y = "Geometria"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(10, 70, 10, 10)
+  )
+
+# ------------------------------------------------------------
+# 13. Matriz completa: classes x índices, separada por geometria
+# ------------------------------------------------------------
+
+matriz_completa <- correlacoes %>%
+  filter(classe %in% c("p_lenhoso", "p_nao_len", "p_solo_nu", "p_dupla")) %>%
+  mutate(
+    classe_nome = factor(
+      classe_nome,
+      levels = c("lenhoso", "nao lenhoso", "solo nu", "classe dupla")
+    )
+  )
+
+write_csv(
+  matriz_completa,
+  file.path(pasta_saida, "08_matriz_completa_correlacoes.csv")
+)
+
+grafico_matriz_completa <- ggplot(
+  matriz_completa,
+  aes(
+    x = indice,
+    y = classe_nome,
+    fill = R
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = round(R, 2)), size = 3) +
+  facet_wrap(~ geometria) +
+  scale_fill_gradient2(
+    low = "firebrick",
+    mid = "white",
+    high = "forestgreen",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  labs(
+    title = "Matriz completa de correlação por geometria",
+    x = "Índice espectral",
+    y = "Classe de campo",
+    fill = "r"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# ------------------------------------------------------------
+# 14. Função para salvar gráficos
+# ------------------------------------------------------------
+
+salvar_grafico <- function(grafico, nome, largura = 11, altura = 7) {
+  
+  caminho_png <- file.path(pasta_saida, paste0(nome, ".png"))
+  caminho_pdf <- file.path(pasta_saida, paste0(nome, ".pdf"))
+  
+  ggsave(
+    filename = caminho_png,
+    plot = grafico,
+    width = largura,
+    height = altura,
+    dpi = 600,
+    bg = "white"
+  )
+  
+  ggsave(
+    filename = caminho_pdf,
+    plot = grafico,
+    width = largura,
+    height = altura,
+    bg = "white"
+  )
+}
+
+# ------------------------------------------------------------
+# 15. Salvar todos os gráficos
+# ------------------------------------------------------------
+
+salvar_grafico(
+  grafico_lenhoso,
+  "01_grafico_melhor_indice_lenhoso",
+  largura = 11,
+  altura = 7
+)
+
+salvar_grafico(
+  grafico_dupla,
+  "02_grafico_melhor_indice_classe_dupla",
+  largura = 11,
+  altura = 7
+)
+
+salvar_grafico(
+  grafico_matriz_lenhoso,
+  "03_matriz_correlacao_lenhoso",
+  largura = 10,
+  altura = 6
+)
+
+salvar_grafico(
+  grafico_solo,
+  "04_grafico_melhor_indice_solo_nu",
+  largura = 11,
+  altura = 7
+)
+
+salvar_grafico(
+  grafico_principais,
+  "05_grafico_principais_correlacoes",
+  largura = 13,
+  altura = 9
+)
+
+salvar_grafico(
+  grafico_matriz_completa,
+  "06_matriz_completa_correlacoes",
+  largura = 14,
+  altura = 8
+)
+
+# ------------------------------------------------------------
+# 16. Mostrar gráficos na aba Plots
+# ------------------------------------------------------------
+
+print(grafico_lenhoso)
+print(grafico_dupla)
+print(grafico_matriz_lenhoso)
+print(grafico_solo)
+print(grafico_principais)
+print(grafico_matriz_completa)
+
+# ------------------------------------------------------------
+# 17. Conferência dos arquivos salvos
+# ------------------------------------------------------------
+
+arquivos_salvos <- list.files(pasta_saida, full.names = TRUE)
+
+print(arquivos_salvos)
+
+message("Análise concluída com sucesso.")
+message(paste0("Arquivos salvos na pasta: ", normalizePath(pasta_saida)))
+
+# Abrir a pasta automaticamente no Windows
+if (.Platform$OS.type == "windows") {
+  shell.exec(normalizePath(pasta_saida))
+}
